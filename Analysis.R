@@ -1,0 +1,669 @@
+library(tidyverse)
+library(dplyr)
+library(viridis)
+library(ggplot2)
+library(cowplot)
+library(plot3D)
+library(plotly)
+
+# First let's read raw data into memory
+fname = "MergedFile_FT_ex.csv"
+dat = read.delim(fname, sep=",", stringsAsFactors=FALSE)
+
+fname2 = "MergedFile_FTNPC_ex.csv"
+dat2 = read.delim(fname2, sep=",", stringsAsFactors=FALSE)
+
+#Merge the two files by all variables
+merged=rbind(dat, dat2)
+write.csv(merged, "Merged_FT.csv")
+
+
+#START FROM HERE, dat IS THE DATAFRAME
+# Let's have a look at filenames so we can if NPC are there
+fname3 = "Merged_FT.csv"
+dat = read.delim(fname3, sep=",", stringsAsFactors=FALSE)
+unique(dat$Filename)
+
+# We need to know what the channels represent
+print(unique(dat$Channel))
+chans = c("Laminin","TypeI","Type2a","Type2a2x","Area")
+names(chans) = c("Ch1","Ch2","Ch3","Ch4","Area")
+dat$Chan = chans[dat$Channel]
+
+# Difficult in this case as different system used for different sections
+dat$Type = "FT"
+dat$Type[grepl("NPC",dat$Filename)] = "NPC"
+# This function partially extracts info.  Needs improvement.
+parsefname = function(str){
+  # str = "PD3_2 FT"
+  outstr = strsplit(str," ")[[1]][1]
+  return(outstr)
+}
+dat$Filename = sapply(dat$Filename,parsefname)
+FibreT = list()
+wides = list()
+
+#Create column for training
+dat$Training = "1"
+dat$Training[grepl("4",dat$Filename)] = "4"
+# This function partially extracts info.  Needs improvement.
+parsefname = function(str){
+  outstr = strsplit(str," ")[[1]][1]
+  return(outstr)
+}
+dat$Filename = sapply(dat$Filename,parsefname)
+
+#Change in Pre and Post exercise
+exercise = c(" Pre","Post")
+names(exercise) = c("1","4")
+dat$Exercise = exercise[dat$Training]
+
+
+for(id in unique(dat$Filename)){
+  ft = dat[(dat$Filename==id)&(dat$Type=="FT"),]
+  npc = dat[(dat$Filename==id)&(dat$Type=="NPC"),] #pairing FT and NPC sections
+  todrop = ft$ID[((ft$Chan=="Area")&(ft$Value<=0))] #Dropping mistakes from segmentation
+  ft = ft[!ft$ID%in%todrop,]
+  if(length(npc$Value)>0){
+    agg = aggregate(npc$Value,list(npc$Chan),mean) #Correcting intensity channel values on NPC 
+    adj = agg[,2]
+    names(adj) = agg[,1]
+    ft$Corrected = ft$Value - adj[ft$Chan]
+    ft$Corrected[ft$Chan=="Area"] = (ft$Value[ft$Chan=="Area"]/9.58) #Need to convert area values from pixel in um2
+    ft$Corrected[ft$Chan=="Laminin"] = ft$Value[ft$Chan=="Laminin"]
+    todrop2 = ft$ID[ft$Corrected<=0] #Dropping the negative values after correction
+    todrop3 = ft$ID[((ft$Chan=="Area")&(ft$Corrected>=11000))] #Dropping area too big 
+    ft = ft[!ft$ID%in%todrop2,]
+    ft = ft[!ft$ID%in%todrop3,]
+    
+  }else{
+    print(paste("WARNING!  No NPC for",id))
+    ft$Corrected = ft$Value
+  }
+  FibreT[[id]] = ft
+  
+  # Convert corrected data from long to wide format
+  dt = reshape(ft[,c("Corrected","Chan","ID")], idvar = "ID", timevar = "Chan", direction="wide")
+  colnames(dt) = gsub("Corrected.","",colnames(dt))
+  wides[[id]] = dt  
+}
+
+# Stick everything back together after correction and give the shape you prefer (WIDE)
+datnew = do.call("rbind",FibreT)
+#write.csv(datnew, "DataWithCorrection.csv")
+
+new <- datnew %>%
+  select(ID, Filename, Chan, Corrected, Type, Exercise)
+df = reshape(data=new, idvar=c("ID", "Filename", "Type", "Exercise"), v.names= "Corrected",
+             timevar="Chan", direction="wide")
+df = rename(df, Laminin = Corrected.Laminin,
+            TypeI = Corrected.TypeI,
+            Type2a = Corrected.Type2a,
+            Type2a2x = Corrected.Type2a2x, 
+            Area = Corrected.Area)
+write.csv(df, "DataCorrected.csv")
+
+#Change name of samples
+unique(df$Filename)
+filename = c("P3", "P3", "P2", "P2", "P1", "P1", "C1", "C2", "C3", "C4", "P5", "P5", "P4", "P4")
+names(filename) = c("AB1", "AB4", "DS1", "DS4", "JG1", "JG4", "M1180-16", "M1189-16", "M1212-16", "M1217-16", "PJ1", "PJ4", "PL1", "PL4")
+df$Sample = filename[df$Filename]
+unique(df$Sample)
+
+# Find the max value between numeric string
+df2 <- df %>%
+  select("TypeI", "Type2a", "Type2a2x")
+df2$colMax <- apply(df2, 1, function(x) max(x))
+
+#Merge two dataframes
+data = merge(df2, df)
+
+#Sorting fibre according to Myh specific isoform more expressed
+data$FibreType <- ifelse(data$colMax == data$Type2a, 'Type2a',
+                         ifelse(data$colMax == data$Type2a2x, 'Type2a2x', 'TypeI'))
+write.csv(data, "DatawithCTRL.csv")
+
+
+
+
+#Distribution of fibre types
+A <- data %>%
+  select(Myh7, Myh2, FibreType) %>%
+  filter(FibreType == "Myh7+" |
+         FibreType == "Myh2+")
+ggplot(A, aes(x=Myh7, y=Myh2)) + 
+  geom_point(aes(colour=FibreType), size = 2, alpha=0.1) +
+  xlab("Myh7+") +
+  ylab("Myh2+") +
+  xlim(0, 4000) +
+  ylim(0, 4000) +
+  scale_color_manual(values=c("firebrick2", "darkgreen"))
+
+B <- data %>%
+  select(Myh7, Myh1, FibreType) %>%
+  filter(FibreType == "Myh7+" |
+        FibreType == "Myh1+")
+ggplot(B, aes(x=Myh7, y=Myh1)) + 
+  geom_point(aes(colour=FibreType), size = 2, alpha=0.1) +
+  xlab("Myh7+") +
+  ylab("Myh1+") +
+  xlim(0, 4000) +
+  ylim(0, 4000) +
+  scale_color_manual(values=c("magenta4", "darkgreen"))
+
+C <- data %>%
+  select(Myh2, Myh1, FibreType) %>%
+  filter(FibreType == "Myh2+" |
+           FibreType == "Myh1+")
+ggplot(C, aes(x=Myh2, y=Myh1)) + 
+  geom_point(aes(colour=FibreType), size = 2, alpha=0.2) +
+  xlab("Myh2+") +
+  ylab("Myh1+") +
+  xlim(0, 4000) +
+  ylim(0, 4000) +
+  scale_color_manual(values=c("purple", "firebrick2"))
+  #geom_smooth(method=lm, se=TRUE, fullrange=FALSE, level=0.95, formula=y~x-1)
+
+D <- data %>%
+  select(Myh2, Myh1, Myh7, FibreType) %>%
+  filter(FibreType == "Myh2+" |
+           FibreType == "Myh1+" |
+           FibreType == "Myh7+")
+
+D$FibreType[which(D$FibreType == 'Myh2')] <- 'Myh2+'
+D$FibreType[which(D$FibreType == 'Myh1')] <- 'Myh1+'
+D$FibreType[which(D$FibreType == 'Myh7')] <- 'Myh7+'
+D$FibreType <- as.factor(D$FibreType)
+
+fig <- plot_ly(D, x = ~Myh2, y = ~Myh1, z = ~Myh7, color = ~FibreType,
+               colors = c('purple', 'firebrick2', 'darkgreen'), size = 3)
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'Myh2'),
+                                   yaxis = list(title = 'Myh1'),
+                                   zaxis = list(title = 'Myh7')))
+
+fig
+
+#Area distribution pre vs post-exercise
+#Type I positive fibres
+TypeIdf <- data %>%
+  select(TypeI, Area, Sample, Exercise, FibreType) %>%
+  filter(FibreType=="TypeI")
+ggplot(TypeIdf, aes(x=Sample, y=Area)) +
+  geom_boxplot(aes(colour=Exercise), width=0.8, alpha=0.1, 
+               notch=TRUE,  outlier.shape=(NA),
+               fill=c("darkgreen", "grey40","darkgreen", "grey40","darkgreen", "grey40","darkgreen", "grey40","darkgreen", "grey40")) +
+  geom_jitter(aes(colour=Exercise), alpha=0.3, shape=16, size=2, position=position_jitterdodge()) +
+  ggtitle("Fibre type I") + 
+  xlab("") +
+  labs(y=expression(paste("Cross sectional area (µm"^{2}, ")"))) +
+  ylim(0, 12000) +
+  scale_color_manual(values=c("darkgreen", "grey40")) +
+  theme()
+
+
+for (fn in sort(unique(TypeIdf$Sample))){
+  pre = TypeIdf$Area[(TypeIdf$Sample==fn)&(TypeIdf$Exercise==" Pre")]
+  post = TypeIdf$Area[(TypeIdf$Sample==fn)&(TypeIdf$Exercise=="Post")]
+  print(fn)
+  print(t.test(pre,post,alternative="less"))
+}
+
+#My way 
+#P1Myh7 <- Myh7df %>%
+  #select(Myh7, Area, Sample, Exercise) %>%
+  #filter(Sample == "P1")
+#testMyh7_P1 <- t.test(Area ~ Exercise, mu=0, alt="less", conf=0.95, var.equal=F, paired=F, data = P1Myh7)
+#testMyh7_P1
+
+#Myh2 positive fibres
+Type2adf <- data %>%
+  select(Type2a, Area, Sample, Exercise, FibreType) %>%
+  filter(FibreType=="Type2a")
+ggplot(Type2adf, aes(x=Sample, y=Area)) +
+  geom_boxplot(aes(colour=Exercise), width=0.8, alpha=0.6, 
+               notch=TRUE,  outlier.shape=(NA),
+               fill=c("firebrick2", "grey40","firebrick2", "grey40","firebrick2", "grey40","firebrick2", "grey40","firebrick2", "grey40")) +
+  geom_jitter(aes(colour=Exercise), alpha=0.3, shape=16, position=position_jitterdodge()) +
+  ggtitle("Fibre type Type2a") + 
+  xlab("") +
+  labs(y=expression(paste("Cross sectional area (µm"^{2}, ")"))) +
+  ylim(0, 12000) +
+  scale_color_manual(values=c("firebrick2", "grey40")) +
+  theme()
+
+for (fn in sort(unique(Type2adf$Sample))){
+  pre = Type2adf$Area[(Type2adf$Sample==fn)&(Type2adf$Exercise==" Pre")]
+  post = Type2adf$Area[(Type2adf$Sample==fn)&(Type2adf$Exercise=="Post")]
+  print(fn)
+  print(t.test(pre,post,alternative="less"))
+}
+
+#Myh1 positive fibres
+Type2a2xdf <- data %>%
+  select(Type2a2x, Area, Sample, Exercise, FibreType) %>%
+  filter(FibreType=="Type2a2x+")
+
+ggplot(Type2a2xdf, aes(x=Sample, y=Area)) +
+  geom_boxplot(aes(colour=Exercise), width=0.8, alpha=0.6, 
+               notch=TRUE,  outlier.shape=(NA),
+               fill=c("magenta4", "grey40","magenta4", "grey40","magenta4", "grey40","magenta4", "grey40","magenta4", "grey40")) +
+  geom_jitter(aes(colour=Exercise), alpha=0.3, shape=16, position=position_jitterdodge()) +
+  ggtitle("Fibre type Type2a2x") + 
+  xlab("") +
+  labs(y=expression(paste("Cross sectional area (µm"^{2}, ")"))) +
+  ylim(0, 12000) + 
+  scale_color_manual(values=c("magenta4", "grey40")) +
+  theme()
+
+for (fn in sort(unique(Type2a2xdf$Sample))){
+  pre = Type2a2xdf$Area[(Type2a2xdf$Sample==fn)&(Type2a2xdf$Exercise==" Pre")]
+  post = Type2a2xdf$Area[(Type2a2xdf$Sample==fn)&(Type2a2xdf$Exercise=="Post")]
+  print(fn)
+  print(t.test(pre,post,alternative="less"))
+}
+
+# How to select those fibres positive both for Myh1 and Myh2? 
+#Myh21df <- data %>%
+#select(Myh2, Myh1, Area, Sample, Exercise, FibreType) %>%
+#filter(FibreType=="Myh2+" |
+#  FibreType=="Myh1+" )
+#write.csv(Myh21df, "Myh2 and 1.csv")
+#fibres around the regression line going trhough the origin
+
+#Fybre type percentages 
+data_frac <- data %>%
+  select(Sample, Exercise, FibreType) %>%
+  group_by(Sample, Exercise) %>%
+  summarise(total=n())
+
+data_frac2 <- data %>%
+  select(Sample, Exercise, FibreType) %>%
+  group_by(Sample, Exercise, FibreType) %>%
+  summarise(total=n()) %>%
+  mutate(Percent=(total/sum(total)*100))
+
+write.csv(data_frac2, "Percenatges_FT.csv")
+
+fname = "Percenatges_FT.csv"
+data_frac2 = read.delim(fname, sep=",", stringsAsFactors=FALSE)
+
+#Lines graph
+#P1
+P1 <- data_frac2 %>%
+  select(Sample, Exercise, FibreType, total, Percent) %>%
+  filter(Sample == 'P1')
+
+ggplot(P1, aes(x=Exercise, y=Percent, col=FibreType)) +
+  geom_point() +
+  geom_line(aes(group=FibreType), size=1) +
+  scale_color_manual(values=c("seagreen", "firebrick2", "magenta4")) +
+  ggtitle("P1") +
+  ylab("Fibre proportion (%)") +
+  xlab("") +
+  ylim(0,100) +
+  theme()
+
+P1I <- prop.test(x = c(171, 352), n = c(479, 781))
+P1I #p-value =  0.00129  ***
+#pre    post 
+#0.3569937 0.4507042 
+P12a <- prop.test(x = c(254, 421), n = c(479, 781))
+P12a #p-value = 0.8063
+#pre    post 
+#0.5302714 0.5390525 
+P12x <- prop.test(x= c(54, 8), n= c(479, 781))
+P12x #p-value = 9.701e-16  ****
+#pre    post 
+#0.11273486 0.01024328 
+
+#P2
+P2 <- data_frac2 %>%
+  select(Sample, Exercise, FibreType, total, Percent) %>%
+  filter(Sample == 'P2')
+
+ggplot(P2, aes(x=Exercise, y=Percent, col=FibreType)) +
+  geom_point() +
+  geom_line(aes(group=FibreType), size=1) +
+  scale_color_manual(values=c("seagreen", "firebrick2", "magenta4")) +
+  ggtitle("P2") +
+  ylab("Fibre proportion (%)") +
+  xlab("") +
+  ylim(0,100) +
+  theme()
+
+P2I <- prop.test(x = c(167, 252), n = c(518, 777))
+P2I #p-value =  0.9903
+#pre    post 
+#0.3223938 0.3243243
+P22a <- prop.test(x = c(239, 260), n = c(518, 777))
+P22a #p-value = 5.79e-06  ****
+#pre    post 
+#0.4613900 0.3346203 
+P22x <- prop.test(x= c(112, 265), n= c(518, 777))
+P22x #p-value = 1.733e-06  ****
+#pre    post 
+#0.2162162 0.3410553 
+
+#P3
+P3 <- data_frac2 %>%
+  select(Sample, Exercise, FibreType, total, Percent) %>%
+  filter(Sample == 'P3')
+
+ggplot(P3, aes(x=Exercise, y=Percent, col=FibreType)) +
+  geom_point() +
+  geom_line(aes(group=FibreType), size=1) +
+  scale_color_manual(values=c("seagreen", "firebrick2", "magenta4")) +
+  ggtitle("P3") +
+  ylab("Fibre proportion (%)") +
+  xlab("") +
+  ylim(0,100) +
+  theme()
+
+P3I <- prop.test(x = c(112, 383), n = c(350, 1323))
+P3I #p-value =  0.2955
+#pre    post 
+#0.3200000 0.2894936 
+P32a <- prop.test(x = c(197, 883), n = c(350, 1323))
+P32a #p-value = 0.0003517  ***
+#pre    post 
+#0.5628571 0.6674225 
+P32x <- prop.test(x= c(41, 57), n= c(350, 1323))
+P32x #p-value = 3.076e-07  ****
+#pre    post 
+#0.1171429 0.0430839 
+
+#P4
+P4 <- data_frac2 %>%
+  select(Sample, Exercise, FibreType, total, Percent) %>%
+  filter(Sample == 'P4')
+
+ggplot(P4, aes(x=Exercise, y=Percent, col=FibreType)) +
+  geom_point() +
+  geom_line(aes(group=FibreType), size=1) +
+  scale_color_manual(values=c("seagreen", "firebrick2", "magenta4")) +
+  ggtitle("P4") +
+  ylab("Fibre proportion (%)") +
+  xlab("") +
+  ylim(0,100) +
+  theme()
+
+P4I <- prop.test(x = c(36, 303), n = c(289, 1494))
+P4I #p-value =  0.002519  ***
+#pre    post 
+#0.1245675 0.2028112 
+P42a <- prop.test(x = c(202, 822), n = c(289, 1494))
+P42a #p-value = 3.896e-06  ***
+#pre    post 
+#0.6989619 0.5502008  
+P42x <- prop.test(x= c(51, 369), n= c(289, 1494))
+P42x #p-value = 0.01206  **
+#pre    post 
+#0.1764706 0.2469880
+
+#P5
+P5 <- data_frac2 %>%
+  select(Sample, Exercise, FibreType, total, Percent) %>%
+  filter(Sample == 'P5')
+
+ggplot(P5, aes(x=Exercise, y=Percent, col=FibreType)) +
+  geom_point() +
+  geom_line(aes(group=FibreType), size=1) +
+  scale_color_manual(values=c("seagreen", "firebrick2", "magenta4")) +
+  ggtitle("P5") +
+  ylab("Fibre proportion (%)") +
+  xlab("") +
+  ylim(0,100) +
+  theme()
+
+P5I <- prop.test(x = c(194, 133), n = c(579, 522))
+P5I #p-value = 0.004447  ***
+#pre    post 
+#0.3350604 0.2547893  
+P52a <- prop.test(x = c(330, 329), n = c(579, 522))
+P52a #p-value = 0.04801  **
+#pre    post 
+#0.5699482 0.6302682   
+P52x <- prop.test(x= c(55, 60), n= c(579, 522))
+P52x #p-value = 0.326 
+#pre    post 
+#0.09499136 0.11494253
+
+
+#Mixed young/Old Controls from Murgia's 2017
+fname = "Controls.csv"
+CTRL = read.delim(fname, sep=",", stringsAsFactors=FALSE)
+
+O1 <- CTRL %>%
+  select(Sample, Class, FibreType, Percent) %>%
+  filter(Class == "Controls")%>%
+  filter(Sample == "O1")
+
+Control <- ggplot(O1, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_bar(stat="identity") +
+  #scale_fill_grey() + theme_minimal() +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .5)) +
+  ggtitle("O1") + 
+  xlab("") +
+  ylim(0,70)+
+  ylab("Fibre type distribution (%)") +
+  theme()
+Control
+
+O2 <- CTRL %>%
+  select(Sample, Class, FibreType, Percent) %>%
+  filter(Class == "Controls")%>%
+  filter(Sample == "O2")
+
+Control <- ggplot(O2, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_bar(stat="identity") +
+  #scale_fill_grey() + theme_minimal() +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .5)) +
+  ggtitle("O2") + 
+  xlab("") +
+  ylim(0,70)+
+  ylab("Fibre type distribution (%)") +
+  theme()
+Control
+
+O3 <- CTRL %>%
+  select(Sample, Class, FibreType, Percent) %>%
+  filter(Class == "Controls")%>%
+  filter(Sample == "O3")
+
+Control <- ggplot(O3, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_bar(stat="identity") +
+  #scale_fill_grey() + theme_minimal() +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .5)) +
+  ggtitle("O3") + 
+  xlab("") +
+  ylim(0,70)+
+  ylab("Fibre type distribution (%)") +
+  theme()
+Control
+
+O4 <- CTRL %>%
+  select(Sample, Class, FibreType, Percent) %>%
+  filter(Class == "Controls")%>%
+  filter(Sample == "O4")
+
+Control <- ggplot(O4, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_bar(stat="identity", position = "dodge") +
+  #scale_fill_grey() + theme_minimal() +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .5)) +
+  ggtitle("O4") + 
+  xlab("") +
+  ylim(0,70)+
+  ylab("Fibre type distribution (%)") +
+  theme()
+Control
+
+Y1 <- CTRL %>%
+  select(Sample, Class, FibreType, Percent) %>%
+  filter(Class == "Controls")%>%
+  filter(Sample == "Y1")
+
+Control <- ggplot(Y1, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_bar(stat="identity") +
+  #scale_fill_grey() + theme_minimal() +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .5)) +
+  ggtitle("Y1") + 
+  xlab("") +
+  ylim(0,70)+
+  ylab("Fibre type distribution (%)") +
+  theme()
+Control
+
+Y2 <- CTRL %>%
+  select(Sample, Class, FibreType, Percent) %>%
+  filter(Class == "Controls")%>%
+  filter(Sample == "Y2")
+
+Control <- ggplot(Y2, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_bar(stat="identity") +
+  #scale_fill_grey() + theme_minimal() +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .5)) +
+  ggtitle("Y2") + 
+  xlab("") +
+  ylim(0,70)+
+  ylab("Fibre type distribution (%)") +
+  theme()
+Control
+
+Y3 <- CTRL %>%
+  select(Sample, Class, FibreType, Percent) %>%
+  filter(Class == "Controls")%>%
+  filter(Sample == "Y3")
+
+Control <- ggplot(Y3, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_bar(stat="identity") +
+  #scale_fill_grey() + theme_minimal() +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .5)) +
+  ggtitle("Y3") + 
+  xlab("") +
+  ylim(0,70)+
+  ylab("Fibre type distribution (%)") +
+  theme()
+Control
+
+Y4 <- CTRL %>%
+  select(Sample, Class, FibreType, Percent) %>%
+  filter(Class == "Controls")%>%
+  filter(Sample == "Y4")
+
+Control <- ggplot(Y4, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_bar(stat="identity", position = "dodge") +
+  #scale_fill_grey() + theme_minimal() +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .5)) +
+  ggtitle("Y4") + 
+  xlab("") +
+  ylim(0,70)+
+  ylab("Fibre type distribution (%)") +
+  theme()
+Control
+
+#PIE CHART OF ALL CONTROLS
+data_frac3 <- CTRL %>%
+  select(Sample, Class, FibreType, Percent) %>%
+  filter(Class == "Controls") %>%
+  group_by(FibreType) %>%
+  summarize(Mean = mean(Percent, na.rm=TRUE))
+
+Control <- ggplot(data_frac3, aes(x=FibreType, y=Mean, fill=FibreType)) +
+  geom_bar(stat="identity", position="dodge") +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .5)) +
+  ggtitle("CTRL") + 
+  xlab("") +
+  ylab("Fibre type distribution (%)") +
+  theme()
+Control
+
+CTRL <- c(42.9,47.6,9.5)
+pal <- c("seagreen", "firebrick2", "magenta4")
+pie(CTRL, labels = c("Type I","Type 2a","Type 2a/2x"), border="white", col=pal)
+
+
+YO <- CTRL %>%
+  select(TypeCTRL, Class, FibreType, Percent) %>%
+  filter(Class == "Controls")
+ggplot(YO, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_point(aes(x=FibreType, y=Percent, fill=FibreType, shape=TypeCTRL), position=position_jitter(w=0.04))+
+  geom_bar(stat="identity", position="dodge") +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .2)) +
+  ggtitle("Mixed young/old controls") + 
+  xlab("") +
+  ylab("Fibre type distribution (%)") +
+  ylim(0,80)+
+  theme()
+
+
+PRE <- CTRL %>%
+  select(Class, FibreType, Percent) %>%
+  filter(Class == " Pre-exercise")
+ggplot(PRE, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_point(aes(x=FibreType, y=Percent, fill=FibreType), position=position_jitter(w=0.04))+
+  geom_bar(stat="identity", position="dodge") +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .2)) +
+  ggtitle("Pre-exercise") + 
+  xlab("") +
+  ylab("Fibre type distribution (%)") +
+  ylim(0,80)+
+  theme()
+
+POST <- CTRL %>%
+  select(Class, FibreType, Percent) %>%
+  filter(Class == "Post")
+ggplot(POST, aes(x=FibreType, y=Percent, fill=FibreType)) +
+  geom_point(aes(x=FibreType, y=Percent, fill=FibreType), position=position_jitter(w=0.04))+
+  geom_bar(stat="identity", position="dodge") +
+  scale_fill_manual(values = alpha(c("seagreen", "firebrick2", "magenta4"), .2)) +
+  ggtitle("Post-exercise") + 
+  xlab("") +
+  ylab("Fibre type distribution (%)") +
+  ylim(0,80)+
+  theme()
+
+
+
+fname = "Asset.csv"
+data = read.delim(fname, sep=",", stringsAsFactors=FALSE)
+
+#I didn't use this one, but above graphs
+test <- ggplot(data, aes(x=Sample, y=Mean, fill=FibreType)) +
+  geom_bar(position="dodge", stat="identity", width=0.7) +
+  scale_fill_manual(values = alpha(c("magenta4", "firebrick2", "seagreen"), 0.7)) +
+  ggtitle("asset") + 
+  xlab("") +
+  ylab("Fibre type distribution (%)") +
+  theme_minimal()
+test
+
+
+#Controls vs pre-exercise
+preI <- prop.test(x = c(1066,680), n = c(2644, 2215))
+preI #p-value = 4.232e-12 ****
+#ctrl pre
+#0.4031770 0.3069977  
+pre2a <- prop.test(x = c(1327,1222), n = c(2644, 2215))
+pre2a #p-value = 0.0005 ***
+#ctrl pre 
+#0.5018911 0.5516930 
+pre2a2x <- prop.test(x= c(251,313), n= c(2644, 2215))
+pre2a2x #p-value = 6.304e-07 ****
+#ctrl pre 
+#0.09493192 0.14130926
+
+#Controls vs post-exercise
+postI <- prop.test(x = c(1066,1423), n = c(2644, 4897))
+postI #p-value < 2.2e-16
+#ctrl post
+#0.4031770 0.2905861  
+post2a <- prop.test(x = c(1327,2715), n = c(2644, 4897))
+post2a #p-value = 1.422e-05
+#ctrl post 
+#0.5018911 0.5544211
+post2a2x <- prop.test(x= c(251,759), n= c(2644, 4897))
+post2a2x #p-value = 3.548e-13
+#ctrl post 
+#0.09493192 0.15499285
+
